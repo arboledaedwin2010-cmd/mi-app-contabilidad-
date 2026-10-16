@@ -1,4 +1,4 @@
-// Estado global
+// Estado global del sistema
 let movements = JSON.parse(localStorage.getItem('cc_movements')) || [];
 let products = JSON.parse(localStorage.getItem('cc_products')) || [];
 let categories = ['Ventas', 'Servicios', 'Compras', 'Proveedores', 'Otros'];
@@ -6,13 +6,14 @@ let userPIN = localStorage.getItem('cc_pin') || null;
 let currentArqueoPeriod = 'diario';
 let chartInstance = null;
 
-// Inicialización de la aplicación
+// Inicialización de la App
 document.addEventListener('DOMContentLoaded', () => {
   checkSecurity();
   loadCategories();
   updateDashboard();
   renderInventory();
-  initNotifications();
+  loadNotificationSettings();
+  initNotificationsScheduler();
 });
 
 // Formateador Pesos Colombianos (COP)
@@ -37,7 +38,7 @@ function switchView(viewId, element) {
   if (viewId === 'view-reports') renderReports();
 }
 
-// Dashboard Finanzas
+// 1️⃣ DASHBOARD Y CÁLCULOS
 function updateDashboard() {
   const totalIncome = movements.filter(m => m.type === 'ingreso').reduce((sum, m) => sum + m.amount, 0);
   const totalExpense = movements.filter(m => m.type === 'gasto').reduce((sum, m) => sum + m.amount, 0);
@@ -55,13 +56,18 @@ function renderRecentMovements() {
   list.innerHTML = '';
   
   const recent = movements.slice(-5).reverse();
+  if (recent.length === 0) {
+    list.innerHTML = '<li class="movement-item" style="justify-content:center; color:#666;">No hay movimientos registrados.</li>';
+    return;
+  }
+
   recent.forEach(m => {
     const li = document.createElement('li');
     li.className = `movement-item ${m.type}`;
     li.innerHTML = `
       <div>
         <strong>${m.category}</strong>
-        <p style="font-size:0.8rem; color:#666">${m.description || 'Sin descripción'}</p>
+        <p style="font-size:0.8rem; color:#666">${m.description || 'Sin descripción'} ${m.photo ? '📸' : ''}</p>
       </div>
       <span class="amount">${m.type === 'ingreso' ? '+' : '-'}${formatCOP(m.amount)}</span>
     `;
@@ -69,17 +75,22 @@ function renderRecentMovements() {
   });
 }
 
-// Registro Movimientos
+// 2️⃣ REGISTRO DE MOVIMIENTOS Y DESCUENTO DE INVENTARIO
 function openMovementModal(type) {
+  document.getElementById('movement-form').reset();
   document.getElementById('form-type').value = type;
   document.getElementById('modal-title').textContent = type === 'ingreso' ? 'Registrar Ingreso' : 'Registrar Gasto';
   
   const discountStockGroup = document.getElementById('group-discount-stock');
+  const quantitySoldGroup = document.getElementById('group-quantity-sold');
+
   if (type === 'ingreso') {
     discountStockGroup.style.display = 'block';
+    quantitySoldGroup.style.display = 'none';
     populateProductDiscountSelect();
   } else {
     discountStockGroup.style.display = 'none';
+    quantitySoldGroup.style.display = 'none';
   }
 
   document.getElementById('modal-movement').classList.add('active');
@@ -89,6 +100,31 @@ function closeModal(modalId) {
   document.getElementById(modalId).classList.remove('active');
 }
 
+function onProductSelectedForSale() {
+  const productId = document.getElementById('form-product-discount').value;
+  const quantitySoldGroup = document.getElementById('group-quantity-sold');
+  
+  if (productId) {
+    quantitySoldGroup.style.display = 'block';
+    document.getElementById('form-qty-sold').value = 1;
+    updateTotalSaleAmount();
+  } else {
+    quantitySoldGroup.style.display = 'none';
+  }
+}
+
+function updateTotalSaleAmount() {
+  const productId = document.getElementById('form-product-discount').value;
+  const qty = parseFloat(document.getElementById('form-qty-sold').value) || 0;
+  if (productId) {
+    const prod = products.find(p => p.id == productId);
+    if (prod && prod.sellPrice) {
+      document.getElementById('form-amount').value = prod.sellPrice * qty;
+    }
+  }
+}
+
+// Función principal que guarda la venta y DESCUENTA EL INVENTARIO
 function saveMovement(e) {
   e.preventDefault();
   const type = document.getElementById('form-type').value;
@@ -96,22 +132,43 @@ function saveMovement(e) {
   const category = document.getElementById('form-category').value;
   const description = document.getElementById('form-description').value;
   const productId = document.getElementById('form-product-discount').value;
+  let qtySold = parseFloat(document.getElementById('form-qty-sold').value) || 0;
+  const photoInput = document.getElementById('form-photo');
 
-  // Descontar inventario si aplica
+  // ➕ NUEVA FUNCIÓN: Restar automáticamente la cantidad vendida del inventario
   if (type === 'ingreso' && productId) {
     const prod = products.find(p => p.id == productId);
-    if (prod && prod.stock > 0) {
-      prod.stock -= 1;
-      localStorage.setItem('cc_products', JSON.stringify(products));
+    if (prod) {
+      if (prod.stock >= qtySold) {
+        prod.stock -= qtySold; // Resta la cantidad vendida
+        localStorage.setItem('cc_products', JSON.stringify(products)); // Guarda el inventario actualizado
+      } else {
+        alert(`⚠️ Stock insuficiente. Solo quedan ${prod.stock} unidades de ${prod.name}.`);
+        return; // Detiene el registro si no hay suficiente existencias
+      }
     }
   }
 
+  // Comprobante con foto opcional
+  if (photoInput.files && photoInput.files[0]) {
+    const reader = new FileReader();
+    reader.onload = function(uploadEvent) {
+      finalizeMovement(type, amount, category, description, uploadEvent.target.result);
+    };
+    reader.readAsDataURL(photoInput.files[0]);
+  } else {
+    finalizeMovement(type, amount, category, description, null);
+  }
+}
+
+function finalizeMovement(type, amount, category, description, photoData) {
   const newMovement = {
     id: Date.now(),
     type,
     amount,
     category,
     description,
+    photo: photoData,
     date: new Date().toISOString()
   };
 
@@ -119,11 +176,11 @@ function saveMovement(e) {
   localStorage.setItem('cc_movements', JSON.stringify(movements));
 
   updateDashboard();
+  renderInventory(); // Actualiza la pantalla de inventario en tiempo real
   closeModal('modal-movement');
-  document.getElementById('movement-form').reset();
 }
 
-// Módulo de Inventario
+// 3️⃣ MÓDULO DE INVENTARIO
 function renderInventory() {
   const list = document.getElementById('inventory-list');
   const alertContainer = document.getElementById('stock-alerts-container');
@@ -131,6 +188,11 @@ function renderInventory() {
   alertContainer.innerHTML = '';
 
   let lowStockItems = [];
+
+  if (products.length === 0) {
+    list.innerHTML = '<li class="inventory-item" style="justify-content:center; color:#666;">No hay productos registrados en el inventario.</li>';
+    return;
+  }
 
   products.forEach(p => {
     const isLow = p.stock <= p.minStock;
@@ -144,8 +206,8 @@ function renderInventory() {
         <p style="font-size:0.8rem; color:#666">Compra: ${formatCOP(p.buyPrice)} | Venta: ${formatCOP(p.sellPrice)}</p>
       </div>
       <div style="text-align:right;">
-        <strong style="font-size:1.1rem; color:var(--color-purple)">${p.stock} unid.</strong>
-        <p><button onclick="deleteProduct(${p.id})" style="border:none; background:none; color:red; cursor:pointer;">Eliminar</button></p>
+        <strong style="font-size:1.1rem; color:var(--color-purple)">${p.stock} dispon.</strong>
+        <p><button onclick="deleteProduct(${p.id})" style="border:none; background:none; color:red; cursor:pointer; font-size:0.8rem; margin-top:4px;">Eliminar</button></p>
       </div>
     `;
     list.appendChild(li);
@@ -153,7 +215,7 @@ function renderInventory() {
 
   if (lowStockItems.length > 0) {
     alertContainer.innerHTML = `
-      <div class="card" style="border-left: 4px solid red; background:#ffebee;">
+      <div class="card" style="border-left: 5px solid #d32f2f; background:#fff5f5; margin-bottom:14px;">
         <strong>⚠️ Atención:</strong> Tienes ${lowStockItems.length} producto(s) por agotarse.
       </div>
     `;
@@ -170,8 +232,8 @@ function saveProduct(e) {
   const newProduct = {
     id: Date.now(),
     name: document.getElementById('prod-name').value,
-    stock: parseInt(document.getElementById('prod-stock').value),
-    minStock: parseInt(document.getElementById('prod-min-stock').value),
+    stock: parseFloat(document.getElementById('prod-stock').value),
+    minStock: parseFloat(document.getElementById('prod-min-stock').value),
     buyPrice: parseFloat(document.getElementById('prod-buy-price').value),
     sellPrice: parseFloat(document.getElementById('prod-sell-price').value)
   };
@@ -197,12 +259,12 @@ function populateProductDiscountSelect() {
   products.forEach(p => {
     const opt = document.createElement('option');
     opt.value = p.id;
-    opt.textContent = `${p.name} (Quedan: ${p.stock})`;
+    opt.textContent = `${p.name} (Quedan: ${p.stock} - ${formatCOP(p.sellPrice)} c/u)`;
     select.appendChild(opt);
   });
 }
 
-// Arqueo de caja
+// 4️⃣ ARQUEO DE CAJA
 function setArqueoPeriod(period, btn) {
   currentArqueoPeriod = period;
   document.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
@@ -228,7 +290,7 @@ function renderArqueo() {
   document.getElementById('arqueo-total').textContent = formatCOP(inc - exp);
 }
 
-// Reportes con Chart.js (Morado / Negro)
+// 5️⃣ REPORTES Y FILTROS
 function renderReports() {
   const ctx = document.getElementById('chart-income-expense').getContext('2d');
   
@@ -243,7 +305,7 @@ function renderReports() {
       labels: ['Ingresos', 'Gastos'],
       datasets: [{
         data: [totalInc, totalExp],
-        backgroundColor: ['#6a1b9a', '#121212']
+        backgroundColor: ['#7b1fa2', '#1a1a1a']
       }]
     }
   });
@@ -263,13 +325,19 @@ function renderMovementsList() {
 
   const list = document.getElementById('full-movements-list');
   list.innerHTML = '';
+  
+  if (filtered.length === 0) {
+    list.innerHTML = '<li class="movement-item" style="justify-content:center; color:#666;">No se encontraron movimientos.</li>';
+    return;
+  }
+
   filtered.reverse().forEach(m => {
     const li = document.createElement('li');
     li.className = `movement-item ${m.type}`;
     li.innerHTML = `
       <div>
         <strong>${m.category}</strong> - <small>${new Date(m.date).toLocaleDateString()}</small>
-        <p style="font-size:0.8rem; color:#666">${m.description || 'Sin descripción'}</p>
+        <p style="font-size:0.8rem; color:#666">${m.description || 'Sin descripción'} ${m.photo ? '📸' : ''}</p>
       </div>
       <span class="amount">${m.type === 'ingreso' ? '+' : '-'}${formatCOP(m.amount)}</span>
     `;
@@ -277,7 +345,39 @@ function renderMovementsList() {
   });
 }
 
-// Exportación CSV
+// 6️⃣ CONFIGURACIÓN, SEGURIDAD Y RESPALDO
+function saveNotificationSettings() {
+  const settings = {
+    daily: document.getElementById('notif-daily').checked,
+    dailyTime: document.getElementById('time-daily').value,
+    weekly: document.getElementById('notif-weekly').checked,
+    weeklyTime: document.getElementById('time-weekly').value,
+    monthly: document.getElementById('notif-monthly').checked,
+    monthlyTime: document.getElementById('time-monthly').value,
+    stock: document.getElementById('notif-stock').checked
+  };
+  localStorage.setItem('cc_notif_settings', JSON.stringify(settings));
+}
+
+function loadNotificationSettings() {
+  const saved = JSON.parse(localStorage.getItem('cc_notif_settings'));
+  if (saved) {
+    document.getElementById('notif-daily').checked = saved.daily;
+    if (saved.dailyTime) document.getElementById('time-daily').value = saved.dailyTime;
+    document.getElementById('notif-weekly').checked = saved.weekly;
+    if (saved.weeklyTime) document.getElementById('time-weekly').value = saved.weeklyTime;
+    document.getElementById('notif-monthly').checked = saved.monthly;
+    if (saved.monthlyTime) document.getElementById('time-monthly').value = saved.monthlyTime;
+    document.getElementById('notif-stock').checked = saved.stock;
+  }
+}
+
+function initNotificationsScheduler() {
+  if ('Notification' in window && Notification.permission !== 'granted') {
+    Notification.requestPermission();
+  }
+}
+
 function exportDataCSV() {
   let csv = 'ID,Tipo,Monto,Categoria,Descripcion,Fecha\n';
   movements.forEach(m => {
@@ -292,7 +392,6 @@ function exportDataCSV() {
   a.click();
 }
 
-// Categorías
 function loadCategories() {
   const select = document.getElementById('form-category');
   select.innerHTML = '';
@@ -304,7 +403,6 @@ function loadCategories() {
   });
 }
 
-// Seguridad (PIN)
 function setupPIN() {
   const pin = prompt('Ingresa un nuevo PIN de 4 dígitos:');
   if (pin && pin.length === 4) {
@@ -335,15 +433,4 @@ function lockApp() {
   } else {
     alert('Configura un PIN primero en Ajustes.');
   }
-}
-
-// Notificaciones web
-function initNotifications() {
-  if ('Notification' in window) {
-    Notification.requestPermission();
-  }
-}
-
-function toggleNotificationSetting(key, enabled) {
-  localStorage.setItem(`cc_notif_${key}`, enabled);
 }
